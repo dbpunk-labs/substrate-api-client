@@ -50,7 +50,9 @@ ac-primitives = { path = "primitives", default-features = false }
 env_logger = "0.9.0"
 node-template-runtime = { git = "https://github.com/dbpunk-labs/substrate.git", branch = "polkadot-v0.9.27" }
 node-runtime = { git = "https://github.com/dbpunk-labs/substrate.git", branch = "polkadot-v0.9.27" }
+db3-runtime = { git = "https://github.com/dbpunk-labs/db3.git", branch = "fix/db3-runtime-compile" }
 sp-keyring = { version = "6.0.0", git = "https://github.com/dbpunk-labs/substrate.git", branch = "polkadot-v0.9.27" }
+pallet-sql-db = { git = "https://github.com/dbpunk-labs/db3.git", branch = "fix/db3-runtime-compile" }
 clap = { version = "2.33", features = ["yaml"] }
 wabt = "0.10.0"
 
