@@ -18,52 +18,50 @@ use std::sync::mpsc::{channel, Receiver};
 use std::str;
 use clap::{load_yaml, App};
 use codec::Decode;
-use node_template_runtime::Event;
+// use node_template_runtime::Event;
 use ac_primitives::{AssetTipExtrinsicParamsBuilder, BaseExtrinsicParams};
 use db3_runtime::{Call};
 use sp_core::H256 as Hash;
 use substrate_api_client::utils::FromHexString;
-use node_runtime::{Header, Address};
+use node_runtime::{Header};
 use sp_keyring::AccountKeyring;
 use sp_runtime::generic::Era;
 use substrate_api_client::rpc::WsRpcClient;
 use substrate_api_client::{compose_extrinsic_offline, Api, AssetTipExtrinsicParams, UncheckedExtrinsicV4, XtStatus, AssetTip, MultiAddress};
+use serde::{Deserialize};
 
+fn run_sql_by_owner_and_add_delegate(owner: &AccountKeyring, delegate_address: &db3_runtime::Address) {
 
-fn main() {
-    env_logger::init();
     let url = get_node_url_from_cli();
-
-    // initialize api and set the signer (sender) that is used to sign the extrinsics
-    let from = AccountKeyring::Alice.pair();
     let client = WsRpcClient::new(&url);
 
+    // initialize api and set the signer (sender) that is used to sign the extrinsics
     let api = Api::<_, _, AssetTipExtrinsicParams>::new(client)
-        .map(|api| api.set_signer(from))
+        .map(|api| api.set_signer(owner.pair()))
         .unwrap();
-    // let meta = api.get_metadata();
-    // println!("Metadata:\n {:?}", meta);
 
     // Information for Era for mortal transactions
     println!("[+] Subscribe to events ... ");
     let (events_in, events_out) = channel();
     api.subscribe_events(events_in).unwrap();
 
+    let mut req_id = 1234;
+
     let tx_param = generate_tx_param(&api);
     let api = api.set_extrinsic_params_builder(tx_param);
     println!(
-        "[+] Alice's Account Nonce is {}\n",
+        "[+] Account Nonce is {}\n",
         api.get_nonce().unwrap()
     );
 
-    println!("[+] create ns >>>>>>>>");
+    println!("[+] req_id: {}, create ns >>>>>>>>", req_id);
     // create_ns("test_ns", "1234");
     #[allow(clippy::redundant_clone)]
         let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
         api.clone().signer.unwrap(),
         Call::SQLDB(pallet_sql_db::Call::create_ns {
             ns: "test_ns".as_bytes().to_vec(),
-            req_id: "1234".as_bytes().to_vec()
+            req_id: req_id.to_string().as_bytes().to_vec(),
         }),
         api.extrinsic_params(api.get_nonce().unwrap())
     );
@@ -74,21 +72,23 @@ fn main() {
         .unwrap();
     println!("[+] Transaction got included in block {:?}", blockh);
 
-    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out));
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
 
+
+    req_id += 1;
     let tx_param = generate_tx_param(&api);
     let api = api.set_extrinsic_params_builder(tx_param);
     println!(
-        "[+] Alice's Account Nonce is {}\n",
+        "[+] Account Nonce is {}\n",
         api.get_nonce().unwrap()
     );
-    println!("[+] runSqlByOwner: create table >>>>>>>>");
+    println!("[+] req_id: {}, runSqlByOwner: create table >>>>>>>>", req_id);
     #[allow(clippy::redundant_clone)]
         let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
         api.clone().signer.unwrap(),
         Call::SQLDB(pallet_sql_db::Call::run_sql_by_owner {
             data: "create table location(id INT NOT NULL PRIMARY KEY, coordinates VARCHAR(50));".as_bytes().to_vec(),
-            req_id: "1234".as_bytes().to_vec(),
+            req_id: req_id.to_string().as_bytes().to_vec(),
             ns: "test_ns".as_bytes().to_vec()
         }),
         api.extrinsic_params(api.get_nonce().unwrap())
@@ -100,25 +100,24 @@ fn main() {
         .unwrap();
     println!("[+] Transaction got included in block {:?}", blockh);
 
-    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out));
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
 
+    req_id += 1;
     let tx_param = generate_tx_param(&api);
     let api = api.set_extrinsic_params_builder(tx_param);
     println!(
-        "[+] Alice's Account Nonce is {}\n",
+        "[+] Account Nonce is {}\n",
         api.get_nonce().unwrap()
     );
-    println!("[+] runSqlByOwner: insert table >>>>>>>>");
+    println!("[+] req_id: {}, runSqlByOwner: insert table >>>>>>>>", req_id);
     #[allow(clippy::redundant_clone)]
         let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
         api.clone().signer.unwrap(),
         Call::SQLDB(pallet_sql_db::Call::run_sql_by_owner {
             data: "insert into location values
 (1, '37.772,-122.214'),
-(2, '21.291,-157.821'),
-(3, '-18.142,178.431'),
-(4, '-27.467,153.027');".as_bytes().to_vec(),
-            req_id: "1234".as_bytes().to_vec(),
+(2, '21.291,-157.821');".as_bytes().to_vec(),
+            req_id: req_id.to_string().as_bytes().to_vec(),
             ns: "test_ns".as_bytes().to_vec()
         }),
         api.extrinsic_params(api.get_nonce().unwrap())
@@ -130,21 +129,22 @@ fn main() {
         .unwrap();
     println!("[+] Transaction got included in block {:?}", blockh);
 
-    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out));
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
 
+    req_id += 1;
     let tx_param = generate_tx_param(&api);
     let api = api.set_extrinsic_params_builder(tx_param);
     println!(
-        "[+] Alice's Account Nonce is {}\n",
+        "[+] Account Nonce is {}\n",
         api.get_nonce().unwrap()
     );
-    println!("[+] runSqlByOwner: select * from table >>>>>>>>");
+    println!("[+] req_id: {}, runSqlByOwner: select * from table >>>>>>>>", req_id);
     #[allow(clippy::redundant_clone)]
         let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
         api.clone().signer.unwrap(),
         Call::SQLDB(pallet_sql_db::Call::run_sql_by_owner {
             data: "select * from location;".as_bytes().to_vec(),
-            req_id: "1234".as_bytes().to_vec(),
+            req_id: req_id.to_string().as_bytes().to_vec(),
             ns: "test_ns".as_bytes().to_vec()
         }),
         api.extrinsic_params(api.get_nonce().unwrap())
@@ -156,13 +156,131 @@ fn main() {
         .unwrap();
     println!("[+] Transaction got included in block {:?}", blockh);
 
-    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out));
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
+
+    req_id += 1;
+
+    let tx_param = generate_tx_param(&api);
+    let api = api.set_extrinsic_params_builder(tx_param);
+    println!(
+        "[+] Account Nonce is {}\n",
+        api.get_nonce().unwrap()
+    );
+    println!("[+] req_id: {}, add delegate to {} for test_ns >>>>>>>>", req_id, delegate_address);
+    #[allow(clippy::redundant_clone)]
+        let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
+        api.clone().signer.unwrap(),
+        Call::SQLDB(pallet_sql_db::Call::add_delegate {
+            delegate: delegate_address.clone(),
+            ns: "test_ns".as_bytes().to_vec(),
+            delegate_type: 3,
+            req_id: req_id.to_string().as_bytes().to_vec(),
+        }),
+        api.extrinsic_params(api.get_nonce().unwrap())
+    );
+    log::debug!("[+] Composed Extrinsic:\n {:?}\n", xt);
+    // send and watch extrinsic until in block
+    let blockh = api
+        .send_extrinsic(xt.hex_encode(), XtStatus::InBlock)
+        .unwrap();
+    println!("[+] Transaction got included in block {:?}", blockh);
+
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
+}
+fn run_sql_by_delegate(delegate : &AccountKeyring, owner_address: &db3_runtime::Address) {
+    let url = get_node_url_from_cli();
+    let client = WsRpcClient::new(&url);
+
+    // initialize api and set the signer (sender) that is used to sign the extrinsics
+
+    let api = Api::<_, _, AssetTipExtrinsicParams>::new(client)
+        .map(|api| api.set_signer(delegate.pair()))
+        .unwrap();
+
+    println!("[+] Subscribe to events ... ");
+    let (events_in, events_out) = channel();
+    api.subscribe_events(events_in).unwrap();
+
+    let mut req_id = 3234;
+    req_id += 1;
+    let tx_param = generate_tx_param(&api);
+    let api = api.set_extrinsic_params_builder(tx_param);
+    println!(
+        "[+] Delegate Account Nonce is {}\n",
+        api.get_nonce().unwrap()
+    );
+    println!("[+] req_id: {}, runSqlByDelegate: insert table >>>>>>>>", req_id);
+    #[allow(clippy::redundant_clone)]
+        let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
+        api.clone().signer.unwrap(),
+        Call::SQLDB(pallet_sql_db::Call::run_sql_by_delegate {
+            owner: owner_address.clone(),
+            data: "insert into location values
+(3, '-18.142,178.431'),
+(4, '-27.467,153.027');".as_bytes().to_vec(),
+            req_id: req_id.to_string().as_bytes().to_vec(),
+            ns: "test_ns".as_bytes().to_vec()
+        }),
+        api.extrinsic_params(api.get_nonce().unwrap())
+    );
+    log::debug!("[+] Composed Extrinsic:\n {:?}\n", xt);
+    // send and watch extrinsic until in block
+    let blockh = api
+        .send_extrinsic(xt.hex_encode(), XtStatus::InBlock)
+        .unwrap();
+    println!("[+] Transaction got included in block {:?}", blockh);
+
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
+
+    req_id += 1;
+    let tx_param = generate_tx_param(&api);
+    let api = api.set_extrinsic_params_builder(tx_param);
+    println!(
+        "[+] Delegate Account Nonce is {}\n",
+        api.get_nonce().unwrap()
+    );
+    println!("[+] req_id: {}, runSqlByDelegate: select * from table >>>>>>>>", req_id);
+    #[allow(clippy::redundant_clone)]
+        let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
+        api.clone().signer.unwrap(),
+        Call::SQLDB(pallet_sql_db::Call::run_sql_by_delegate {
+            owner: owner_address.clone(),
+            data: "select * from location;".as_bytes().to_vec(),
+            req_id: req_id.to_string().as_bytes().to_vec(),
+            ns: "test_ns".as_bytes().to_vec()
+        }),
+        api.extrinsic_params(api.get_nonce().unwrap())
+    );
+    log::debug!("[+] Composed Extrinsic:\n {:?}\n", xt);
+    // send and watch extrinsic until in block
+    let blockh = api
+        .send_extrinsic(xt.hex_encode(), XtStatus::InBlock)
+        .unwrap();
+    println!("[+] Transaction got included in block {:?}", blockh);
+
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
 }
 
+fn main() {
+    env_logger::init();
+    let bob_address = db3_runtime::Address::Id(
+        db3_runtime::AccountId::new(AccountKeyring::Bob.to_account_id().into()));
+    let alice_address = db3_runtime::Address::Id(
+        db3_runtime::AccountId::new(AccountKeyring::Alice.to_account_id().into()));
+
+    run_sql_by_owner_and_add_delegate(&AccountKeyring::Alice, &bob_address);
+    run_sql_by_delegate(&AccountKeyring::Bob, &alice_address);
+}
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct ResponseBody<'a> {
+    status: u8,
+    msg: &'a str,
+    req_id: &'a str,
+}
 /***
 Try to receive one GeneralResultEvent
  */
-fn receive_sqldb_event(events_out: &Receiver<String>) -> String {
+fn receive_sqldb_event(events_out: &Receiver<String>, req_id: i32) -> String {
     for _ in 0..5 {
         let event_str = events_out.recv().unwrap();
         let _unhex = Vec::from_hex(event_str).unwrap();
@@ -181,7 +299,12 @@ fn receive_sqldb_event(events_out: &Receiver<String>) -> String {
                                         Ok(v) => v,
                                         Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
                                     };
-                                    return String::from(json_str);
+                                    let data: ResponseBody = serde_json::from_str(json_str).unwrap();
+                                    if req_id.to_string().eq(data.req_id) {
+                                        return String::from(json_str);
+                                    } else {
+                                        log::info!("ignoring event with unexpected req_id {}", data.req_id);
+                                    }
                                 }
                                 _ => {
                                     log::debug!("ignoring unsupported SQLDB event");
