@@ -55,7 +55,7 @@ sp-keyring = { version = "6.0.0", git = "https://github.com/dbpunk-labs/substrat
 pallet-sql-db = { git = "https://github.com/dbpunk-labs/db3.git", branch = "fix/db3-runtime-compile" }
 clap = { version = "2.33", features = ["yaml"] }
 wabt = "0.10.0"
-
+mysql_cdc = { git = "https://github.com/rusuly/mysql_cdc.git"}
 
 [features]
 default = ["std", "ws-client"]
