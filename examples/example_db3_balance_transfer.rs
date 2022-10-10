@@ -18,7 +18,8 @@
 use clap::{load_yaml, App};
 
 use ac_primitives::AssetTipExtrinsicParamsBuilder;
-use node_runtime::{BalancesCall, Header, Call};
+use node_runtime::{Header};
+use db3_runtime::{BalancesCall, Call};
 use sp_keyring::AccountKeyring;
 use sp_runtime::generic::Era;
 use sp_runtime::MultiAddress;
@@ -56,12 +57,14 @@ fn main() {
 
     let updated_api = api.set_extrinsic_params_builder(tx_params);
     let nonce = updated_api.get_nonce().unwrap();
+    let bob_address = db3_runtime::Address::Id(db3_runtime::AccountId::new(AccountKeyring::Bob.to_account_id().into()));
+
     // compose the extrinsic with all the element
     #[allow(clippy::redundant_clone)]
     let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
         updated_api.clone().signer.unwrap(),
         Call::Balances(BalancesCall::transfer {
-            dest: MultiAddress::Id(to.clone()),
+            dest: bob_address.clone(),
             value: 42
         }),
         updated_api.extrinsic_params(nonce)
