@@ -18,13 +18,13 @@ fn main() -> Result<(), Error> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() <= 3 {
-        log::error!("Try passing mysql_username, mysql_password, binlog_file");
+        log::error!("Try passing mysql_username, mysql_password, database");
         return Err(Error::String(String::from("Invalid Arguments")));
     }
 
     let username = &args[1];
     let password = &args[2];
-    let binlog = &args[3];
+    let database = &args[3];
 
     // Start replication from MariaDB GTID
     let _options = BinlogOptions::from_mariadb_gtid(GtidList::parse("0-1-270")?);
@@ -35,7 +35,8 @@ fn main() -> Result<(), Error> {
     let _options = BinlogOptions::from_mysql_gtid(GtidSet::parse(gtid_set)?);
 
     // Start replication from the position
-    let _options = BinlogOptions::from_position(binlog.clone(), 0);
+    // let _options = BinlogOptions::from_position(binlog.clone(), 0);
+    let _options = BinlogOptions::from_start();
 
     // Start replication from last master position.
     // Useful when you are only interested in new changes.
@@ -65,7 +66,7 @@ fn main() -> Result<(), Error> {
         log::debug!("Replication position before event processed");
         print_position(&client);
 
-        sync_to_db3(&header, &event, &mut tid_2_table_map_event);
+        sync_to_db3(&header, &event, &database.as_str(), &mut tid_2_table_map_event);
         // After you processed the event, you need to update replication position
         client.commit(&header, &event);
 
@@ -74,18 +75,22 @@ fn main() -> Result<(), Error> {
     }
     Ok(())
 }
-fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, tid_map:  &mut HashMap<u64, TableMapEvent>) {
-    log::info!("{:?}", event);
+fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
+               tid_map:  &mut HashMap<u64, TableMapEvent>) {
 
     match event {
         BinlogEvent::QueryEvent(e) => {
             log::info!("Handle QueryEvent >>>");
-            log::warn!("{:?}", e);
+            log::debug!("{:?}", e);
             if e.error_code != 0 {
                 log::error!("Skip running sql query with query code: {}", e.error_code);
                 return;
             }
-            log::warn!("sql {}", e.sql_statement);
+            if e.database_name.ne(database) {
+                log::info!("Skip handling database {}", e.database_name);
+                return;
+            }
+            log::info!("sql {}", e.sql_statement);
         },
         BinlogEvent::RowsQueryEvent(e) => {
             log::error!("Can't Handle RowsQueryEvent currently >>>");
@@ -95,7 +100,10 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, tid_map:  &mut HashMap
             log::info!("Handle WriteRowsEvent >>>");
             match tid_map.get(&e.table_id) {
                 Some(table_map_event) => {
-
+                    if table_map_event.database_name.ne(database) {
+                        log::info!("Skip handling database {}", table_map_event.database_name.as_str());
+                        return;
+                    }
                     if !all_colume_present(&e.columns_present) {
                         log::error!(" Can't handle write rows with column not present. To be supported.");
                         return;
@@ -122,6 +130,10 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, tid_map:  &mut HashMap
             match tid_map.get(&e.table_id) {
                 Some(table_map_event) => {
 
+                    if table_map_event.database_name.ne(database) {
+                        log::info!("Skip handling database {}", table_map_event.database_name.as_str());
+                        return;
+                    }
                     if table_map_event.table_metadata.is_none() || table_map_event.table_metadata.as_ref().unwrap().column_names.is_none() {
                         log::error!("Can't handle update rows with column_names is none. To be supported.");
                         return;
@@ -158,6 +170,10 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, tid_map:  &mut HashMap
             match tid_map.get(&e.table_id) {
                 Some(table_map_event) => {
 
+                    if table_map_event.database_name.ne(database) {
+                        log::info!("Skip handling database {}", table_map_event.database_name.as_str());
+                        return;
+                    }
                     if table_map_event.table_metadata.is_none() || table_map_event.table_metadata.as_ref().unwrap().column_names.is_none() {
                         log::error!(" Can't handle delete rows with column_names is none. To be supported.");
                         return;
