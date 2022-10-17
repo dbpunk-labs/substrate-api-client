@@ -13,19 +13,40 @@ use mysql_cdc::events::table_map_event::TableMapEvent;
 use mysql_cdc::events::row_events::row_data::RowData;
 use mysql_cdc::events::row_events::mysql_value::MySqlValue;
 
+
+use std::sync::mpsc::{channel, Receiver};
+use std::str;
+use clap::{load_yaml, App};
+use codec::Decode;
+// use node_template_runtime::Event;
+use ac_primitives::{AssetTipExtrinsicParamsBuilder, BaseExtrinsicParams};
+use db3_runtime::{Call};
+use sp_core::H256 as Hash;
+use substrate_api_client::utils::FromHexString;
+use node_runtime::{Header};
+use sp_keyring::AccountKeyring;
+use sp_runtime::generic::Era;
+use substrate_api_client::rpc::WsRpcClient;
+use substrate_api_client::{compose_extrinsic_offline, Api, AssetTipExtrinsicParams, UncheckedExtrinsicV4, XtStatus, AssetTip, MultiAddress};
+use serde::{Deserialize};
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct ResponseBody<'a> {
+    status: u8,
+    msg: &'a str,
+    req_id: &'a str,
+}
 fn main() -> Result<(), Error> {
     env_logger::init();
-    let args: Vec<String> = env::args().collect();
+    let yml = load_yaml!("db3_backup.yml");
+    let matches = App::from_yaml(yml).get_matches();
 
-    if args.len() <= 3 {
-        log::error!("Try passing mysql_username, mysql_password, database");
-        return Err(Error::String(String::from("Invalid Arguments")));
-    }
-
-    let username = &args[1];
-    let password = &args[2];
-    let database = &args[3];
-
+    let node_ip = matches.value_of("node-server").unwrap_or("ws://127.0.0.1");
+    let node_port = matches.value_of("node-port").unwrap_or("9944");
+    let ns = matches.value_of("node-ns").unwrap_or("demo_ns");
+    let username = matches.value_of("mysql-username").unwrap_or("root");
+    let password = matches.value_of("mysql-password").unwrap();
+    let database = matches.value_of("mysql-database").unwrap();
+    let url = format!("{}:{}", node_ip, node_port);
     // Start replication from MariaDB GTID
     let _options = BinlogOptions::from_mariadb_gtid(GtidList::parse("0-1-270")?);
 
@@ -47,8 +68,8 @@ fn main() -> Result<(), Error> {
     let options = BinlogOptions::from_start();
 
     let options = ReplicaOptions {
-        username: username.clone(),
-        password: password.clone(),
+        username: String::from(username),
+        password: String::from(password),
         blocking: true,
         ssl_mode: SslMode::Disabled,
         binlog: options,
@@ -56,17 +77,73 @@ fn main() -> Result<(), Error> {
     };
 
     let mut client = BinlogClient::new(options);
-
     let mut tid_2_table_map_event = HashMap::<u64, TableMapEvent>::new();
+
+
+
+    let delegate = AccountKeyring::Bob;
+    let owner = AccountKeyring::Alice;
+
+    let mut api = Api::<_, _, AssetTipExtrinsicParams>::new(WsRpcClient::new(&url))
+        .map(|api| api.set_signer(delegate.pair()))
+        .unwrap();
+
+    println!("[+] Subscribe to events ... ");
+    let (events_in, events_out) = channel();
+    api.subscribe_events(events_in).unwrap();
+
+    let delegate_address = db3_runtime::Address::Id(
+        db3_runtime::AccountId::new(AccountKeyring::Bob.to_account_id().into()));
+    let owner_address = db3_runtime::Address::Id(
+        db3_runtime::AccountId::new(AccountKeyring::Alice.to_account_id().into()));
+
+    let mut req_id = 1;
+
+    create_ns_with_delegate(url.as_ref(), &owner, &delegate_address, ns, req_id);
+
+
     for result in client.replicate()? {
         let (header, event) : (EventHeader, BinlogEvent) = result?;
-        // println!("Header: {:#?}", header);
-        // println!("Event: {:#?}", event);
-
         log::debug!("Replication position before event processed");
         print_position(&client);
 
-        sync_to_db3(&header, &event, &database.as_str(), &mut tid_2_table_map_event);
+        match sync_to_db3(&header, &event, database, &mut tid_2_table_map_event) {
+            Some(sql) => {
+                if sql.is_empty() {
+                    continue;
+                }
+                let tx_param = generate_tx_param(&api);
+                let api = api.clone().set_extrinsic_params_builder(tx_param);
+                println!(
+                    "[+] Delegate Account Nonce is {}\n",
+                    api.get_nonce().unwrap()
+                );
+                println!("[+] req_id: {}, runSqlByDelegate: insert table >>>>>>>>", req_id);
+                #[allow(clippy::redundant_clone)]
+                let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
+                api.clone().signer.unwrap(),
+                Call::SQLDB(pallet_sql_db::Call::run_sql_by_delegate {
+                    owner: owner_address.clone(),
+                    data: sql.as_bytes().to_vec(),
+                    req_id: req_id.to_string().as_bytes().to_vec(),
+                    ns: ns.as_bytes().to_vec()
+                }),
+                api.extrinsic_params(api.get_nonce().unwrap())
+                );
+
+                log::debug!("[+] Composed Extrinsic:\n {:?}\n", xt);
+                // send and watch extrinsic until in block
+                let blockh = api
+                    .send_extrinsic(xt.hex_encode(), XtStatus::InBlock)
+                    .unwrap();
+                println!("[+] Transaction got included in block {:?}", blockh);
+
+                println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
+                req_id += 1;
+            }
+            None => {}
+        }
+
         // After you processed the event, you need to update replication position
         client.commit(&header, &event);
 
@@ -75,8 +152,106 @@ fn main() -> Result<(), Error> {
     }
     Ok(())
 }
+fn create_ns_with_delegate(url: &str, owner: &AccountKeyring,
+                           delegate_address: &db3_runtime::Address,
+                           ns_name: &str, req_id: i32) {
+
+    let client = WsRpcClient::new(url);
+
+    // initialize api and set the signer (sender) that is used to sign the extrinsics
+    let api = Api::<_, _, AssetTipExtrinsicParams>::new(client)
+        .map(|api| api.set_signer(owner.pair()))
+        .unwrap();
+
+    // Information for Era for mortal transactions
+    println!("[+] Subscribe to events ... ");
+    let (events_in, events_out) = channel();
+    api.subscribe_events(events_in).unwrap();
+
+    let tx_param = generate_tx_param(&api);
+    let api = api.set_extrinsic_params_builder(tx_param);
+    println!(
+        "[+] Account Nonce is {}\n",
+        api.get_nonce().unwrap()
+    );
+
+    println!("[+] req_id: {}, create ns >>>>>>>>", req_id);
+    // create_ns("test_ns", "1234");
+    #[allow(clippy::redundant_clone)]
+        let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
+        api.clone().signer.unwrap(),
+        Call::SQLDB(pallet_sql_db::Call::create_ns_and_add_delegate {
+            ns: ns_name.as_bytes().to_vec(),
+            delegate: delegate_address.clone(),
+            delegate_type: 3,
+            req_id: req_id.to_string().as_bytes().to_vec(),
+        }),
+        api.extrinsic_params(api.get_nonce().unwrap())
+    );
+    log::debug!("[+] Composed Extrinsic:\n {:?}\n", xt);
+    // send and watch extrinsic until in block
+    let blockh = api
+        .send_extrinsic(xt.hex_encode(), XtStatus::InBlock)
+        .unwrap();
+    println!("[+] Transaction got included in block {:?}", blockh);
+
+    println!("[+] GeneralResultEvent:\n {}", receive_sqldb_event(&events_out, req_id));
+}
+
+
+fn generate_tx_param<P>(api: &Api<P, WsRpcClient, AssetTipExtrinsicParams>) -> AssetTipExtrinsicParamsBuilder {
+    let head = api.get_finalized_head().unwrap().unwrap();
+    let h: Header = api.get_header(Some(head)).unwrap().unwrap();
+    let period = 5;
+    AssetTipExtrinsicParamsBuilder::new()
+        .era(Era::mortal(period, h.number.into()), head)
+        .tip(AssetTip::new(0))
+}
+/***
+Try to receive one GeneralResultEvent
+ */
+fn receive_sqldb_event(events_out: &Receiver<String>, req_id: i32) -> String {
+    for _ in 0..5 {
+        let event_str = events_out.recv().unwrap();
+        let _unhex = Vec::from_hex(event_str).unwrap();
+        let mut _er_enc = _unhex.as_slice();
+        let _events = Vec::<system::EventRecord<db3_runtime::Event, Hash>>::decode(&mut _er_enc);
+        match _events {
+            Ok(evts) => {
+                for evr in &evts {
+                    log::debug!("decoded: {:?} {:?}", evr.phase, evr.event);
+                    match &evr.event {
+                        db3_runtime::Event::SQLDB(be) => {
+                            log::debug!(">>>>>>>>>> db3 SQLDB event: {:?}", be);
+                            match &be {
+                                pallet_sql_db::Event::GeneralResultEvent(event_data) => {
+                                    let json_str = match str::from_utf8(event_data) {
+                                        Ok(v) => v,
+                                        Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+                                    };
+                                    let data: ResponseBody = serde_json::from_str(json_str).unwrap();
+                                    if req_id.to_string().eq(data.req_id) {
+                                        return String::from(json_str);
+                                    } else {
+                                        log::info!("ignoring event with unexpected req_id {}", data.req_id);
+                                    }
+                                }
+                                _ => {
+                                    log::debug!("ignoring unsupported SQLDB event");
+                                }
+                            }
+                        }
+                        _ => log::info!("ignoring unsupported module event: {:?}", evr.event),
+                    }
+                }
+            }
+            Err(_) => log::error!("couldn't decode event record list"),
+        }
+    }
+    String::from("")
+}
 fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
-               tid_map:  &mut HashMap<u64, TableMapEvent>) {
+               tid_map:  &mut HashMap<u64, TableMapEvent>) -> Option<String> {
 
     match event {
         BinlogEvent::QueryEvent(e) => {
@@ -84,17 +259,18 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
             log::debug!("{:?}", e);
             if e.error_code != 0 {
                 log::error!("Skip running sql query with query code: {}", e.error_code);
-                return;
+                return None;
             }
             if e.database_name.ne(database) {
                 log::info!("Skip handling database {}", e.database_name);
-                return;
+                return None;
             }
             log::info!("sql {}", e.sql_statement);
+            return Some(e.sql_statement.clone());
         },
         BinlogEvent::RowsQueryEvent(e) => {
             log::error!("Can't Handle RowsQueryEvent currently >>>");
-            return;
+            return None;
         }
         BinlogEvent::WriteRowsEvent(e) => {
             log::info!("Handle WriteRowsEvent >>>");
@@ -102,11 +278,11 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
                 Some(table_map_event) => {
                     if table_map_event.database_name.ne(database) {
                         log::info!("Skip handling database {}", table_map_event.database_name.as_str());
-                        return;
+                        return None;
                     }
                     if !all_colume_present(&e.columns_present) {
                         log::error!(" Can't handle write rows with column not present. To be supported.");
-                        return;
+                        return None;
                     }
 
                     let rows = rows_to_string(&e.rows);
@@ -115,11 +291,11 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
                                       table_map_event.table_name, rows);
 
                     log::info!("insert sql statement: {}", sql);
-                    return;
+                    return Some(sql);
                 }
                 None => {
                     log::error!("Skip WriteRowsEvent. There is no tableMapEvent correspond to tid {}.", e.table_id);
-                    return;
+                    return None;
                 }
             }
             log::debug!("next event position: {}", header.next_event_position);
@@ -132,19 +308,19 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
 
                     if table_map_event.database_name.ne(database) {
                         log::info!("Skip handling database {}", table_map_event.database_name.as_str());
-                        return;
+                        return None;
                     }
                     if table_map_event.table_metadata.is_none() || table_map_event.table_metadata.as_ref().unwrap().column_names.is_none() {
                         log::error!("Can't handle update rows with column_names is none. To be supported.");
-                        return;
+                        return None;
                     }
                     if !all_colume_present(&e.columns_before_update) || !all_colume_present(&e.columns_after_update) {
                         log::error!("Can't handle update rows when before/after column not all present. To be supported.");
-                        return;
+                        return None;
                     }
                     if e.rows.is_empty() {
                         log::error!(" Can't handle update rows with empty rows.");
-                        return;
+                        return None;
                     }
 
                     let column_names = &table_map_event.table_metadata.as_ref().unwrap().column_names.as_ref().unwrap();
@@ -156,14 +332,13 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
                                       generate_eq_condition(column_names, &e.rows[0].before_update.cells));
 
                     log::info!("update sql statement: {}", sql);
-                    return;
+                    return Some(sql);
                 }
                 None => {
                     log::error!("Fail to handle DeleteRowsEvent when there is no tableMapEvent correspond to tid {}.", e.table_id);
-                    return;
+                    return None;
                 }
             }
-            return;
         },
         BinlogEvent::DeleteRowsEvent(e) => {
             log::info!("Handle DeleteRowsEvent >>>");
@@ -172,19 +347,19 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
 
                     if table_map_event.database_name.ne(database) {
                         log::info!("Skip handling database {}", table_map_event.database_name.as_str());
-                        return;
+                        return None;
                     }
                     if table_map_event.table_metadata.is_none() || table_map_event.table_metadata.as_ref().unwrap().column_names.is_none() {
                         log::error!(" Can't handle delete rows with column_names is none. To be supported.");
-                        return;
+                        return None;
                     }
                     if !all_colume_present(&e.columns_present) {
                         log::error!(" Can't handle delete rows with column not present. To be supported.");
-                        return;
+                        return None;
                     }
                     if e.rows.is_empty() {
                         log::error!(" Can't handle delete rows with empty rows.");
-                        return;
+                        return None;
                     }
 
                     let column_names = &table_map_event.table_metadata.as_ref().unwrap().column_names.as_ref().unwrap();
@@ -195,23 +370,26 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
                                       generate_eq_condition(column_names, &e.rows[0].cells));
 
                     log::info!("delete sql statement: {}", sql);
-                    return;
+                    return Some(sql);
                 }
                 None => {
                     log::error!("Fail to handle DeleteRowsEvent when there is no tableMapEvent correspond to tid {}.", e.table_id);
-                    return;
+                    return None;
                 }
             }
 
         },
         BinlogEvent::TableMapEvent(e) => {
             tid_map.insert(e.table_id, e.clone());
+            return None;
         }
         BinlogEvent::UnknownEvent => {
             log::debug!("Skip UnknownEvent!");
+            return None;
         },
         _ => {
             log::debug!("Skip Event Type {} ", header.event_type);
+            return None
         }
     }
 }
