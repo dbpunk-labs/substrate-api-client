@@ -45,7 +45,9 @@ fn main() -> Result<(), Error> {
     let ns = matches.value_of("node-ns").unwrap_or("demo_ns");
     let username = matches.value_of("mysql-username").unwrap_or("root");
     let password = matches.value_of("mysql-password").unwrap();
-    let database = matches.value_of("mysql-database").unwrap();
+    // let database = matches.value_of("mysql-database").unwrap();
+    // only support MAIN database for now
+    let database = "main";
     let url = format!("{}:{}", node_ip, node_port);
     // Start replication from MariaDB GTID
     let _options = BinlogOptions::from_mariadb_gtid(GtidList::parse("0-1-270")?);
@@ -107,7 +109,7 @@ fn main() -> Result<(), Error> {
         log::debug!("Replication position before event processed");
         print_position(&client);
 
-        match sync_to_db3(&header, &event, database, &mut tid_2_table_map_event) {
+        match convert_binlog_event_to_sql(&header, &event, database, &mut tid_2_table_map_event) {
             Some(sql) => {
                 if sql.is_empty() {
                     continue;
@@ -118,7 +120,7 @@ fn main() -> Result<(), Error> {
                     "[+] Delegate Account Nonce is {}\n",
                     api.get_nonce().unwrap()
                 );
-                println!("[+] req_id: {}, runSqlByDelegate: insert table >>>>>>>>", req_id);
+                println!("[+] req_id: {}, runSqlByDelegate: {}", req_id, sql);
                 #[allow(clippy::redundant_clone)]
                 let xt: UncheckedExtrinsicV4<_, _> = compose_extrinsic_offline!(
                 api.clone().signer.unwrap(),
@@ -211,7 +213,7 @@ fn generate_tx_param<P>(api: &Api<P, WsRpcClient, AssetTipExtrinsicParams>) -> A
 Try to receive one GeneralResultEvent
  */
 fn receive_sqldb_event(events_out: &Receiver<String>, req_id: i32) -> String {
-    for _ in 0..5 {
+    for _ in 0..100 {
         let event_str = events_out.recv().unwrap();
         let _unhex = Vec::from_hex(event_str).unwrap();
         let mut _er_enc = _unhex.as_slice();
@@ -233,7 +235,7 @@ fn receive_sqldb_event(events_out: &Receiver<String>, req_id: i32) -> String {
                                     if req_id.to_string().eq(data.req_id) {
                                         return String::from(json_str);
                                     } else {
-                                        log::info!("ignoring event with unexpected req_id {}", data.req_id);
+                                        log::warn!("ignoring event with unexpected req_id {}", data.req_id);
                                     }
                                 }
                                 _ => {
@@ -250,8 +252,8 @@ fn receive_sqldb_event(events_out: &Receiver<String>, req_id: i32) -> String {
     }
     String::from("")
 }
-fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
-               tid_map:  &mut HashMap<u64, TableMapEvent>) -> Option<String> {
+fn convert_binlog_event_to_sql(header: &EventHeader, event: &BinlogEvent, database: &str,
+                               tid_map:  &mut HashMap<u64, TableMapEvent>) -> Option<String> {
 
     match event {
         BinlogEvent::QueryEvent(e) => {
@@ -263,6 +265,10 @@ fn sync_to_db3(header: &EventHeader, event: &BinlogEvent, database: &str,
             }
             if e.database_name.ne(database) {
                 log::info!("Skip handling database {}", e.database_name);
+                return None;
+            }
+            if (e.sql_statement.as_str().trim().eq_ignore_ascii_case("begin")) {
+                log::warn!("Skip BEGIN statement");
                 return None;
             }
             log::info!("sql {}", e.sql_statement);
