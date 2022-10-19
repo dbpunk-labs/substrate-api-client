@@ -271,8 +271,9 @@ fn convert_binlog_event_to_sql(header: &EventHeader, event: &BinlogEvent, databa
                 log::warn!("Skip BEGIN statement");
                 return None;
             }
-            log::info!("sql {}", e.sql_statement);
-            return Some(e.sql_statement.clone());
+            let sql_format = e.sql_statement.as_str().replace('"', "'");
+            log::info!("sql {}", sql_format);
+            return Some(sql_format);
         },
         BinlogEvent::RowsQueryEvent(e) => {
             log::error!("Can't Handle RowsQueryEvent currently >>>");
