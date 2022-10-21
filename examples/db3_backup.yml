@@ -1,0 +1,37 @@
+name: "substrate-api-client-examples"
+version: "1.0.0"
+about: Example codes showing the api's capabilities
+authors: "Supercomputing Systems AG <info@scs.ch>"
+
+# AppSettings can be defined as a list and are **not** ascii case sensitive
+settings:
+  - ColoredHelp
+
+args:
+  - node-server:
+      long: url
+      help: Set the node server IP address including ws:// or wss:// prefix
+      takes_value: true
+  - node-port:
+      long: port
+      help: Set the websocket port to listen for substrate events
+      takes_value: true
+  - node-ns:
+      long: ns
+      help: Set the namespace
+      takes_value: true
+  - mysql-username:
+      long: username
+      help: Set the username of the mysql
+      takes_value: true
+  - mysql-password:
+      long: password
+      help: Set the passowrd of the mysql
+      takes_value: true
+  - mysql-database:
+      long: database
+      help: Set the bakcup database
+      takes_value: true
+
+
+

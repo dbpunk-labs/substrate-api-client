@@ -148,7 +148,7 @@ pub fn on_get_request_msg(msg: Message, out: Sender, result: ThreadOut<String>) 
     out.close(CloseCode::Normal)
         .unwrap_or_else(|_| warn!("Could not close Websocket normally"));
 
-    info!("Got get_request_msg {}", msg);
+    debug!("Got get_request_msg {}", msg);
     let result_str = serde_json::from_str(msg.as_text()?)
         .map(|v: serde_json::Value| v["result"].to_string())
         .map_err(|e| Box::new(RpcClientError::Serde(e)))?;
